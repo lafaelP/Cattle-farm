@@ -4,6 +4,8 @@
 #include <esp_wifi.h>
 #include <InfluxDbClient.h>
 #include <InfluxDbCloud.h>
+#include "FS.h"
+#include "SD.h"
 
 #define INFLUXDB_URL "http://172.25.20.88:8086/"
 #define INFLUXDB_TOKEN "N-LNqiKNsxCWEHY5_mO-xmE3GmnAqkETI5wyNeMFinr2wSAIcbP5ytf9d_Enfc_zw7cug5G3K3bUjwt-T_RzpA=="
@@ -14,14 +16,21 @@
 const char* ssid = "WIR-Guest";
 const char* password = "Guest@WIRgroup";
 
+const char* ntpServer = "pool.ntp.org";
+const long  gmtOffset_sec = 7*60*60;
+const int   daylightOffset_sec = 0;
+
 uint8_t wearable_MAC[] = {0xB0, 0xB2, 0x1C, 0x61, 0x14, 0x84};
 
 const long interval = 60000;
 long previousMillis = 0;
 unsigned long lastInfluxDBCheckMillis = 0;
-const unsigned long influxDBCheckInterval = 10000;
+const unsigned long influxDBCheckInterval = 50000;
+
+float random1, random2, random3, random4;
 
 bool newDataReceived = false;
+bool uploadedFromSD = false;
 
 InfluxDBClient client(INFLUXDB_URL, INFLUXDB_ORG, INFLUXDB_BUCKET, INFLUXDB_TOKEN, InfluxDbCloud2CACert);
 Point WearableReadings("Wearable");
@@ -88,13 +97,11 @@ void connectWifi() {
 void connectInflux() {
     timeSync(TZ_INFO, "pool.ntp.org", "time.nis.gov");
 
-    if (client.validateConnection())
-    {
+    if (client.validateConnection()) {
         Serial.print("Connected to InfluxDB: ");
         Serial.println(client.getServerUrl());
     }
-    else
-    {
+    else {
         Serial.print("InfluxDB connection failed: ");
         Serial.println(client.getLastErrorMessage());
     }
@@ -110,12 +117,91 @@ void initESPnow() {
     peerInfo.channel = 0;  
     peerInfo.encrypt = false;
             
-    if (esp_now_add_peer(&peerInfo) != ESP_OK){
+    if (esp_now_add_peer(&peerInfo) != ESP_OK) {
       Serial.println("Failed to add peer");
       return;
     }
 
     esp_now_register_recv_cb(OnDataRecv);
+}
+
+void initTime() {
+    configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+}
+
+void initSD() {
+    if(!SD.begin(5)){
+    Serial.println("Card Mount Failed");
+    return;
+  }
+}
+
+void printLocalTime()
+{
+  struct tm timeinfo;
+  if(!getLocalTime(&timeinfo)){
+    Serial.println("Failed to obtain time");
+    return;
+  }
+  Serial.println(&timeinfo, "%d %B %Y %H:%M:%S");
+}
+
+void writeFile(fs::FS &fs, const char * path, const char * message){
+  Serial.printf("Writing file: %s\n", path);
+
+  File file = fs.open(path, FILE_WRITE);
+  if(!file){
+    Serial.println("Failed to open file for writing");
+    return;
+  }
+  if(file.print(message)){
+    Serial.println("File written");
+  } else {
+    Serial.println("Write failed");
+  }
+  file.close();
+}
+
+void appendFile(fs::FS &fs, const char * path, const char * message){
+  Serial.printf("Appending to file: %s\n", path);
+
+  File file = fs.open(path, FILE_APPEND);
+  if(!file) {
+    Serial.println("Failed to open file for appending");
+    return;
+  }
+  if(file.print(message)) {
+      Serial.println("Message appended");
+  } else {
+    Serial.println("Append failed");
+  }
+  file.close();
+}
+
+void deleteFile(fs::FS &fs, const char * path){
+  Serial.printf("Deleting file: %s\n", path);
+  if(fs.remove(path)){
+    Serial.println("File deleted");
+  } else {
+    Serial.println("Delete failed");
+  }
+}
+
+void dataHouse() {
+    random1 = random(0, 10);
+    random2 = random(11, 20);
+    random3 = random(21, 30);
+    random4 = random(31, 40);
+
+    Serial.println("Cowhouse data:");
+    Serial.print("Random 1: ");
+    Serial.println(random1);
+    Serial.print("Random 2: ");
+    Serial.println(random2);
+    Serial.print("Random 3: ");
+    Serial.println(random3);
+    Serial.print("Random 4: ");
+    Serial.println(random4);
 }
 
 void InfluxWearable() {
@@ -132,21 +218,6 @@ void InfluxWearable() {
 }
 
 void InfluxHouse() {
-    float random1 = random(0, 10);
-    float random2 = random(11, 20);
-    float random3 = random(21, 30);
-    float random4 = random(31, 40);
-
-    Serial.println("Cowhouse data:");
-    Serial.print("Random 1: ");
-    Serial.println(random1);
-    Serial.print("Random 2: ");
-    Serial.println(random2);
-    Serial.print("Random 3: ");
-    Serial.println(random3);
-    Serial.print("Random 4: ");
-    Serial.println(random4);
-
     CowhouseReadings.addField("Env1", random1);
     CowhouseReadings.addField("Env2", random2);
     CowhouseReadings.addField("Env3", random3);
@@ -160,6 +231,112 @@ void InfluxHouse() {
     CowhouseReadings.clearFields();
 }
 
+void SDwearable() {
+    struct tm timeinfo;
+    if(!getLocalTime(&timeinfo)){
+      Serial.println("Failed to obtain time");
+      return;
+    }
+
+    char timestamp[40];
+    strftime(timestamp, sizeof(timestamp), "%d %B %Y %H:%M:%S", &timeinfo);
+
+    String wearableData = String(timestamp); 
+    wearableData += ",";
+    wearableData += String(wearable.randomHeartRate);
+    wearableData += ",";
+    wearableData += String(wearable.randomSpO2);
+    wearableData += ",";
+    wearableData += String(wearable.location);
+    wearableData += "\n";
+
+    appendFile(SD, "/wearable_data.txt", wearableData.c_str());
+}
+
+void SDcowhouse() {
+    struct tm timeinfo;
+    if(!getLocalTime(&timeinfo)){
+      Serial.println("Failed to obtain time");
+      return;
+    }
+
+    char timestamp[40];
+    strftime(timestamp, sizeof(timestamp), "%d %B %Y %H:%M:%S", &timeinfo);
+
+    String cowhouseData = String(timestamp);
+    cowhouseData += ",";
+    cowhouseData += String(random1);
+    cowhouseData += ",";
+    cowhouseData += String(random2);
+    cowhouseData += ",";
+    cowhouseData += String(random3);
+    cowhouseData += ",";
+    cowhouseData += String(random4);
+    cowhouseData += "\n";
+
+    appendFile(SD, "/cowhouse_data.txt", cowhouseData.c_str());
+}
+
+void readSDwearable(fs::FS &fs, const char * path, InfluxDBClient &client, Point &WearableReadings) {
+  Serial.printf("Reading file: %s\n", path);
+
+  File file = fs.open(path);
+  if(!file){
+    Serial.println("Failed to open file for reading");
+    return;
+  }
+
+  while(file.available()){
+    String line = file.readStringUntil('\n');
+    line.trim();
+
+    char timestamp[40];
+    float heartRate, spO2, location;
+    sscanf(line.c_str(), "%[^,],%f,%f,%f", timestamp, &heartRate, &spO2, &location);
+
+    WearableReadings.addField("HeartRate", heartRate);
+    WearableReadings.addField("SpO2", spO2);
+    WearableReadings.addField("Location", location);
+
+    if (client.writePoint(WearableReadings)) {
+      Serial.println("Data uploaded to InfluxDB");
+    } else {
+      Serial.println("Failed to upload data to InfluxDB");
+    }
+  }
+  file.close();
+}
+
+void readSDcowhouse(fs::FS &fs, const char * path, InfluxDBClient &client, Point &CowhouseReadings) {
+  Serial.printf("Reading file: %s\n", path);
+
+  File file = fs.open(path);
+  if(!file){
+    Serial.println("Failed to open file for reading");
+    return;
+  }
+
+  while(file.available()){
+    String line = file.readStringUntil('\n');
+    line.trim();
+
+    char timestamp[40];
+    float random1, random2, random3, random4;
+    sscanf(line.c_str(), "%[^,],%f,%f,%f,%f", &random1, &random2, &random3, &random4);
+
+    CowhouseReadings.addField("Env1", random1);
+    CowhouseReadings.addField("Env2", random2);
+    CowhouseReadings.addField("Env3", random3);
+    CowhouseReadings.addField("Env4", random4);
+
+    if (client.writePoint(CowhouseReadings)) {
+      Serial.println("Data uploaded to InfluxDB");
+    } else {
+      Serial.println("Failed to upload data to InfluxDB");
+    }
+  }
+  file.close();
+}
 
 void setup() {
     Serial.begin(9600);
@@ -167,27 +344,48 @@ void setup() {
     connectWifi();
     connectInflux();
     initESPnow();
+    initTime();
+    initSD();
+    writeFile(SD, "/wearable_data.txt", "Heart Rate, SpO2, Location \r\n");
+    writeFile(SD, "/cowhouse_data.txt", "random1,random2,random3,random4 \r\n");
 }
 
 void loop() {
     unsigned long currentMillis = millis();
 
-    if (currentMillis - lastInfluxDBCheckMillis >= influxDBCheckInterval) {
-        lastInfluxDBCheckMillis = currentMillis;
+    if (!client.validateConnection()) {
+        Serial.println("InfluxDB connection lost. Reconnecting...");
+        connectInflux();
 
-        // Check if the connection is still valid
-        if (!client.validateConnection()) {
-            Serial.println("InfluxDB connection lost. Reconnecting...");
-            connectInflux();
+        if (currentMillis - previousMillis >= interval) {
+            previousMillis = currentMillis;
+            dataHouse();
+            SDcowhouse();
         }
-    }  
-    if (currentMillis - previousMillis >= interval) {
-        previousMillis = currentMillis;
-
-    InfluxHouse();
+        if (newDataReceived){
+            SDwearable();
+            newDataReceived = false;
+        }
+        
+        uploadedFromSD = false;
     }
-    if (newDataReceived){
-      InfluxWearable();
-      newDataReceived = false;
+    else {
+        if (!uploadedFromSD) {
+            readSDwearable(SD, "/wearable_data.txt", client, WearableReadings);
+            readSDcowhouse(SD, "/cowhouse_data.txt", client, CowhouseReadings);
+            deleteFile(SD, "/werable_data.txt");
+            deleteFile(SD, "/cowhouse_data.txt");
+            uploadedFromSD = true;
+        }
+
+        if (currentMillis - previousMillis >= interval) {
+            previousMillis = currentMillis;
+            dataHouse();
+            InfluxHouse();
+        }
+        if (newDataReceived){
+          InfluxWearable();
+          newDataReceived = false;
+        }
     }
 }
